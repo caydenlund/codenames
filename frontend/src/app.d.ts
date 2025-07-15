@@ -20,9 +20,7 @@ declare global {
         // interface Error {}
         // interface Locals {}
         // interface PageData {}
-        interface PageState {
-            board: Grid;
-        }
+        // interface PageState {}
         // interface Platform {}
     }
 
