@@ -51,7 +51,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors())
             .route("/board/public", web::get().to(api::board::public))
             .route("/board/spymaster", web::get().to(api::board::spymaster))
-            .route("/reveal", web::get().to(api::reveal));
+            .route("/reveal", web::post().to(api::reveal));
         App::new()
             .app_data(game.clone())
             .wrap(cors())

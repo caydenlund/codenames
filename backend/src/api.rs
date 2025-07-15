@@ -23,16 +23,18 @@ pub struct RevealParams {
 
 pub async fn reveal(
     data: web::Data<Mutex<Game>>,
-    params: web::Query<RevealParams>,
+    params: web::Json<RevealParams>,
 ) -> impl Responder {
     if params.row >= 5 || params.col >= 5 {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid coordinates",
-            "message": "Row and column must be between 0 and 4"
+            "message": "Row and column must be between 0 and 4."
         }));
     }
 
     data.lock().unwrap().reveal_card(params.row, params.col);
+
+    // TODO: Notify websocket clients
 
     HttpResponse::Ok().json(data.lock().unwrap().public_json())
 }
