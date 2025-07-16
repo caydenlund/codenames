@@ -1,40 +1,44 @@
-use crate::game::Game;
+use crate::{
+    game::GameState,
+    websocket::{CardRevealData, WsMessage, WsState},
+};
 use actix_web::{HttpResponse, Responder, web};
 use serde::Deserialize;
-use std::sync::Mutex;
 
-pub mod board {
-    use super::*;
+pub async fn get_board_public(game_state: web::Data<GameState>) -> impl Responder {
+    web::Json(game_state.public_json())
+}
 
-    pub async fn public(data: web::Data<Mutex<Game>>) -> impl Responder {
-        web::Json(data.lock().unwrap().public_json())
-    }
-
-    pub async fn spymaster(data: web::Data<Mutex<Game>>) -> impl Responder {
-        web::Json(data.lock().unwrap().spymaster_json())
-    }
+pub async fn get_board_spymaster(game_state: web::Data<GameState>) -> impl Responder {
+    web::Json(game_state.spymaster_json())
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RevealParams {
-    row: usize,
-    col: usize,
+    pub row: usize,
+    pub col: usize,
 }
 
-pub async fn reveal(
-    data: web::Data<Mutex<Game>>,
-    params: web::Json<RevealParams>,
+pub async fn post_reveal(
+    req: web::Json<RevealParams>,
+    game_state: web::Data<GameState>,
+    ws_state: web::Data<WsState>,
 ) -> impl Responder {
-    if params.row >= 5 || params.col >= 5 {
+    let (row, col) = (req.row, req.col);
+    if row >= 5 || col >= 5 {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Invalid coordinates",
             "message": "Row and column must be between 0 and 4."
         }));
     }
 
-    data.lock().unwrap().reveal_card(params.row, params.col);
+    ws_state.broadcast(WsMessage::CardRevealed {
+        data: CardRevealData {
+            row,
+            col,
+            new_card_state: serde_json::json!(game_state.reveal_card(row, col)),
+        },
+    });
 
-    // TODO: Notify websocket clients
-
-    HttpResponse::Ok().json(data.lock().unwrap().public_json())
+    HttpResponse::Ok().into()
 }

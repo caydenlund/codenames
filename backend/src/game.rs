@@ -1,5 +1,6 @@
 use rand::{rng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,12 +49,12 @@ pub enum Turn {
     Red,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Game {
-    pub board: [[Card; 5]; 5],
+#[derive(Debug, Clone)]
+pub struct GameState {
+    pub board: Arc<Mutex<[[Card; 5]; 5]>>,
 }
 
-impl Game {
+impl GameState {
     pub fn new(words: &[String; 25], first_turn: Turn) -> Self {
         let ((blue_cards, red_cards), assassin_cards) = (
             match first_turn {
@@ -85,12 +86,16 @@ impl Game {
                 .for_each(|(r, c)| board[r][c].team = team);
         });
 
-        Game { board }
+        GameState {
+            board: Arc::new(Mutex::new(board)),
+        }
     }
 
     pub fn public_json(&self) -> serde_json::Value {
         serde_json::json!(
             self.board
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|row| row.iter().map(Card::public_json).collect::<Vec<_>>())
                 .collect::<Vec<_>>()
@@ -98,10 +103,46 @@ impl Game {
     }
 
     pub fn spymaster_json(&self) -> serde_json::Value {
-        serde_json::json!(self.board)
+        serde_json::json!(*self.board.lock().unwrap())
     }
 
-    pub fn reveal_card(&mut self, row: usize, col: usize) {
-        self.board[row][col].revealed = true;
+    pub fn reveal_card(&self, row: usize, col: usize) -> Card {
+        self.board.lock().unwrap()[row][col].revealed = true;
+        self.board.lock().unwrap()[row][col].clone()
+    }
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        Self::new(
+            &[
+                "alpha".into(),
+                "bravo".into(),
+                "charlie".into(),
+                "delta".into(),
+                "echo".into(),
+                "foxtrot".into(),
+                "golf".into(),
+                "hotel".into(),
+                "india".into(),
+                "juliett".into(),
+                "kilo".into(),
+                "lima".into(),
+                "mike".into(),
+                "november".into(),
+                "oscar".into(),
+                "papa".into(),
+                "quebec".into(),
+                "romeo".into(),
+                "sierra".into(),
+                "tango".into(),
+                "uniform".into(),
+                "victor".into(),
+                "whiskey".into(),
+                "x-ray".into(),
+                "yankee".into(),
+            ],
+            Turn::Blue,
+        )
     }
 }
