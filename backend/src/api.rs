@@ -2,7 +2,7 @@ use crate::{
     game::GameState,
     websocket::{CardRevealData, WsMessage, WsState},
 };
-use actix_web::{HttpResponse, Responder, web};
+use actix_web::{HttpResponse, Responder, body::BoxBody, web};
 use serde::Deserialize;
 
 pub async fn get_board_public(game_state: web::Data<GameState>) -> impl Responder {
@@ -41,4 +41,17 @@ pub async fn post_reveal(
     });
 
     HttpResponse::Ok().into()
+}
+
+pub async fn post_new_game(
+    game_state: web::Data<GameState>,
+    ws_state: web::Data<WsState>,
+) -> impl Responder {
+    game_state.new_game();
+
+    ws_state.broadcast(WsMessage::GameReset {
+        data: game_state.public_json(),
+    });
+
+    std::convert::Into::<HttpResponse<BoxBody>>::into(HttpResponse::Ok())
 }

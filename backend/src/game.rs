@@ -1,6 +1,9 @@
-use rand::{rng, seq::SliceRandom};
+use rand::rng;
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+
+use crate::words::get_words;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,14 +22,6 @@ pub struct Card {
 }
 
 impl Card {
-    pub fn new(word: &str) -> Self {
-        Self {
-            word: word.to_string(),
-            team: Team::Neutral,
-            revealed: false,
-        }
-    }
-
     pub fn public_json(&self) -> serde_json::Value {
         if self.revealed {
             serde_json::json!({
@@ -49,45 +44,57 @@ pub enum Turn {
     Red,
 }
 
+pub type Board = [[Card; 5]; 5];
+
 #[derive(Debug, Clone)]
 pub struct GameState {
-    pub board: Arc<Mutex<[[Card; 5]; 5]>>,
+    pub board: Arc<Mutex<Board>>,
+    pub first_turn: Arc<Mutex<Turn>>,
 }
 
 impl GameState {
-    pub fn new(words: &[String; 25], first_turn: Turn) -> Self {
-        let ((blue_cards, red_cards), assassin_cards) = (
-            match first_turn {
-                Turn::Blue => (9, 8),
-                Turn::Red => (8, 9),
-            },
-            1,
-        );
-
-        let mut board =
-            std::array::from_fn(|r| std::array::from_fn(|c| Card::new(&words[r * 5 + c])));
-
+    pub fn new_board(first_turn: Turn) -> Board {
         let mut rng = rng();
 
-        let mut indices: Vec<_> = (0..5).flat_map(|r| (0..5).map(move |c| (r, c))).collect();
-        indices.shuffle(&mut rng);
-        let mut indices = indices.into_iter();
+        let mut teams = {
+            let (blue_cards, red_cards) = match first_turn {
+                Turn::Blue => (9, 8),
+                Turn::Red => (8, 9),
+            };
+            let mut teams: Vec<_> = vec![Team::Blue; blue_cards]
+                .into_iter()
+                .chain(vec![Team::Red; red_cards])
+                .chain(vec![Team::Assassin; 1])
+                .chain(vec![Team::Neutral; 25 - red_cards - blue_cards - 1])
+                .collect();
+            teams.shuffle(&mut rng);
+            teams.into_iter()
+        };
 
-        [
-            (blue_cards, Team::Blue),
-            (red_cards, Team::Red),
-            (assassin_cards, Team::Assassin),
-        ]
-        .into_iter()
-        .for_each(|(count, team)| {
-            indices
-                .by_ref()
-                .take(count)
-                .for_each(|(r, c)| board[r][c].team = team);
-        });
+        let mut words = get_words().into_iter();
+        std::array::from_fn(|_| {
+            std::array::from_fn(|_| Card {
+                word: words.next().unwrap().to_string(),
+                team: teams.next().unwrap(),
+                revealed: false,
+            })
+        })
+    }
 
+    pub fn new_game(&self) {
+        let new_first = match *self.first_turn.lock().unwrap() {
+            Turn::Blue => Turn::Red,
+            Turn::Red => Turn::Blue,
+        };
+        *self.first_turn.lock().unwrap() = new_first;
+
+        *self.board.lock().unwrap() = Self::new_board(*self.first_turn.lock().unwrap());
+    }
+
+    pub fn new(first_turn: Turn) -> Self {
         GameState {
-            board: Arc::new(Mutex::new(board)),
+            board: Arc::new(Mutex::new(Self::new_board(first_turn))),
+            first_turn: Arc::new(Mutex::new(first_turn)),
         }
     }
 
@@ -114,35 +121,6 @@ impl GameState {
 
 impl Default for GameState {
     fn default() -> Self {
-        Self::new(
-            &[
-                "alpha".into(),
-                "bravo".into(),
-                "charlie".into(),
-                "delta".into(),
-                "echo".into(),
-                "foxtrot".into(),
-                "golf".into(),
-                "hotel".into(),
-                "india".into(),
-                "juliett".into(),
-                "kilo".into(),
-                "lima".into(),
-                "mike".into(),
-                "november".into(),
-                "oscar".into(),
-                "papa".into(),
-                "quebec".into(),
-                "romeo".into(),
-                "sierra".into(),
-                "tango".into(),
-                "uniform".into(),
-                "victor".into(),
-                "whiskey".into(),
-                "x-ray".into(),
-                "yankee".into(),
-            ],
-            Turn::Blue,
-        )
+        Self::new(Turn::Blue)
     }
 }
