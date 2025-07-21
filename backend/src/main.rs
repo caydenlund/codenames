@@ -2,6 +2,7 @@ use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 
 mod api;
+mod frontend;
 mod game;
 mod public;
 mod websocket;
@@ -33,6 +34,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors())
             .service(api)
             .route("/ws", web::get().to(websocket::get_ws))
+            .route("/{path:.*}", web::get().to(frontend::get_frontend))
     })
     .bind(("127.0.0.1", 8080))?
     .run()
