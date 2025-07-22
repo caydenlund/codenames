@@ -42,31 +42,38 @@ impl Actor for WsConnection {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        println!(
-            "Websocket connection `{}` (`{:?}`) started",
-            self.id, self.client_type
-        );
-
         let mut rx = self.tx.subscribe();
         let addr = ctx.address();
         let client_type = self.client_type;
+        let id = self.id;
+
+        println!("Websocket connection {client_type:?} {id} started",);
 
         actix::spawn(async move {
             while let Ok((msg, tgt)) = rx.recv().await {
                 match tgt {
                     Some(typ) => {
                         if typ == client_type {
+                            println!("Sending to {client_type:?} {id}:\n{msg:?}");
                             addr.do_send(BroadcastMessage(msg))
+                        } else {
+                            println!("Ignoring {client_type:?} {id}:\n{msg:?}");
                         }
                     }
-                    None => addr.do_send(BroadcastMessage(msg)),
+                    None => {
+                        println!("Sending to {client_type:?} {id}:\n{msg:?}");
+                        addr.do_send(BroadcastMessage(msg))
+                    }
                 }
             }
         });
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        println!("Websocket connection `{}` stopped", self.id);
+        println!(
+            "Websocket connection {:?} {} stopped",
+            self.client_type, self.id
+        );
     }
 }
 
@@ -74,12 +81,13 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            Ok(ws::Message::Pong(_)) => {}
+            // Ok(ws::Message::Pong(_)) => {}
             Ok(ws::Message::Text(text)) => {
                 println!("Received text: `{text}`");
             }
-            Ok(ws::Message::Binary(_)) => {}
+            // Ok(ws::Message::Binary(_)) => {}
             Ok(ws::Message::Close(reason)) => {
+                println!("Closing for reason: `{reason:?}`");
                 ctx.close(reason);
                 ctx.stop();
             }

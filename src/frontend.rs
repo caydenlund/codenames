@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, Responder, web};
 use rust_embed::Embed;
 
 #[derive(Embed)]
-#[folder = "../frontend/build"]
+#[folder = "frontend/build"]
 pub struct Frontend;
 
 pub async fn get_frontend(path: web::Path<String>) -> impl Responder {

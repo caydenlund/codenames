@@ -189,6 +189,7 @@ class BoardStore {
             };
 
             this._ws.onmessage = (event) => {
+                console.log("WebSocket message: ", event.data);
                 try {
                     const message: WsMessage = JSON.parse(event.data);
                     this._handleWebSocketMessage(message);
