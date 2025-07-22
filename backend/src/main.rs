@@ -1,5 +1,6 @@
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
+use clap::Parser;
 
 mod api;
 mod frontend;
@@ -8,9 +9,25 @@ mod public;
 mod websocket;
 mod words;
 
+#[derive(Parser, Debug)]
+/// A web application implementation of Codenames
+#[command(author, version, about, long_about = None)]
+pub struct Args {
+    /// Host address to bind the server to
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 8080)]
+    pub port: u16,
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let args = Args::parse();
+
     env_logger::init();
+
     let cors = || {
         // FIXME
         // Cors::default()
@@ -36,7 +53,10 @@ async fn main() -> std::io::Result<()> {
             .route("/ws", web::get().to(websocket::get_ws))
             .route("/{path:.*}", web::get().to(frontend::get_frontend))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind((args.host.clone(), args.port))
+    .inspect(|_| {
+        println!("Codenames running at http://{}:{}", args.host, args.port);
+    })?
     .run()
     .await
 }
