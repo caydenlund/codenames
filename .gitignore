@@ -1,1 +1,4 @@
-.direnv
+/.direnv
+/target
+.shuttle*
+Secrets*.toml

@@ -34,9 +34,16 @@ export interface RevealRequest {
     col: number;
 }
 
-export interface WSMessage {
-    type: "board_update" | "card_revealed" | "game_reset";
-    data: any;
+export interface WsMessage {
+    type: "card_revealed" | "new_game";
+    data:
+        | {
+              row: number;
+              col: number;
+              new_card_state: SpymasterCard;
+          }
+        | PublicBoard
+        | SpymasterBoard;
 }
 
 class BoardStore {
@@ -45,6 +52,7 @@ class BoardStore {
     private _reconnectTimer: number | null = null;
     private _maxReconnectAttempts = 5;
     private _reconnectDelay = 1000;
+    private _mode: "public" | "spymaster" = "public";
 
     constructor() {
         this._store = writable<BoardState>({
@@ -76,6 +84,7 @@ class BoardStore {
             loading: true,
             error: null
         }));
+        this._mode = mode;
 
         try {
             const endpoint = mode === "public" ? "/api/board/public" : "/api/board/spymaster";
@@ -125,6 +134,32 @@ class BoardStore {
         }
     }
 
+    async newGame(): Promise<void> {
+        try {
+            this._store.update((state) => ({
+                ...state,
+                loading: true
+            }));
+
+            const response = await fetch("/api/new_game", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: "{}"
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+        } catch (error) {
+            this._store.update((state) => ({
+                ...state,
+                error: error instanceof Error ? error.message : "Failed to create a new game"
+            }));
+        }
+    }
+
     clearError(): void {
         this._store.update((state) => ({ ...state, error: null }));
     }
@@ -135,7 +170,7 @@ class BoardStore {
         }
 
         try {
-            const wsUrl = "/ws";
+            const wsUrl = `/ws?type=${this._mode}`;
 
             this._ws = new WebSocket(wsUrl);
 
@@ -155,7 +190,7 @@ class BoardStore {
 
             this._ws.onmessage = (event) => {
                 try {
-                    const message: WSMessage = JSON.parse(event.data);
+                    const message: WsMessage = JSON.parse(event.data);
                     this._handleWebSocketMessage(message);
                 } catch (error) {
                     console.error("Failed to parse WebSocket message:", error);
@@ -188,30 +223,27 @@ class BoardStore {
         }
     }
 
-    private _handleWebSocketMessage(message: WSMessage): void {
-        const currentState = get(this._store);
-
+    private _handleWebSocketMessage(message: WsMessage): void {
         switch (message.type) {
-            case "board_update":
+            case "card_revealed":
+                if ("row" in message.data) {
+                    const { row, col, new_card_state } = message.data;
+                    this._store.update((state) => {
+                        const newBoard = [...state.board];
+                        newBoard[row] = [...newBoard[row]];
+                        newBoard[row][col] = new_card_state;
+                        return { ...state, board: newBoard };
+                    });
+                }
+                break;
+
+            case "new_game":
                 this._store.update((state) => ({
                     ...state,
-                    board: message.data,
+                    board: message.data as PublicBoard | SpymasterBoard,
+                    loading: false,
                     error: null
                 }));
-                break;
-
-            case "card_revealed":
-                const { row, col, new_card_state } = message.data;
-                this._store.update((state) => {
-                    const newBoard = [...state.board];
-                    newBoard[row] = [...newBoard[row]];
-                    newBoard[row][col] = new_card_state;
-                    return { ...state, board: newBoard };
-                });
-                break;
-
-            case "game_reset":
-                this.initialize(currentState.mode);
                 break;
 
             default:

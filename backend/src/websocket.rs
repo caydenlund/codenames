@@ -5,17 +5,20 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ClientType {
+    Public,
+    Spymaster,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsMessage {
-    #[serde(rename = "board_update")]
-    BoardUpdate { data: serde_json::Value },
-
     #[serde(rename = "card_revealed")]
     CardRevealed { data: CardRevealData },
 
-    #[serde(rename = "game_reset")]
-    GameReset { data: serde_json::Value },
+    #[serde(rename = "new_game")]
+    NewGame { data: serde_json::Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,23 +32,35 @@ pub struct CardRevealData {
 #[rtype(result = "()")]
 pub struct BroadcastMessage(pub WsMessage);
 
-pub struct WebsocketConnection {
+pub struct WsConnection {
     pub id: usize,
-    pub tx: broadcast::Sender<WsMessage>,
+    pub client_type: ClientType,
+    pub tx: broadcast::Sender<(WsMessage, Option<ClientType>)>,
 }
 
-impl Actor for WebsocketConnection {
+impl Actor for WsConnection {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        println!("Websocket connection `{}` started", self.id);
+        println!(
+            "Websocket connection `{}` (`{:?}`) started",
+            self.id, self.client_type
+        );
 
         let mut rx = self.tx.subscribe();
         let addr = ctx.address();
+        let client_type = self.client_type;
 
         actix::spawn(async move {
-            while let Ok(msg) = rx.recv().await {
-                addr.do_send(BroadcastMessage(msg));
+            while let Ok((msg, tgt)) = rx.recv().await {
+                match tgt {
+                    Some(typ) => {
+                        if typ == client_type {
+                            addr.do_send(BroadcastMessage(msg))
+                        }
+                    }
+                    None => addr.do_send(BroadcastMessage(msg)),
+                }
             }
         });
     }
@@ -55,7 +70,7 @@ impl Actor for WebsocketConnection {
     }
 }
 
-impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebsocketConnection {
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
@@ -79,7 +94,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebsocketConnecti
     }
 }
 
-impl Handler<BroadcastMessage> for WebsocketConnection {
+impl Handler<BroadcastMessage> for WsConnection {
     type Result = ();
 
     fn handle(&mut self, msg: BroadcastMessage, ctx: &mut Self::Context) {
@@ -94,7 +109,7 @@ impl Handler<BroadcastMessage> for WebsocketConnection {
 #[derive(Clone)]
 pub struct WsState {
     pub next_conn_id: Arc<Mutex<usize>>,
-    pub broadcast_tx: broadcast::Sender<WsMessage>,
+    pub broadcast_tx: broadcast::Sender<(WsMessage, Option<ClientType>)>,
 }
 
 impl WsState {
@@ -112,7 +127,7 @@ impl WsState {
         *id
     }
 
-    pub fn broadcast(&self, message: WsMessage) {
+    pub fn broadcast(&self, message: (WsMessage, Option<ClientType>)) {
         if let Err(e) = self.broadcast_tx.send(message) {
             println!("Failed to broadcast message: `{e}`");
         }
@@ -130,9 +145,15 @@ pub async fn get_ws(
     stream: web::Payload,
     ws_state: web::Data<WsState>,
 ) -> Result<HttpResponse> {
+    let client_type = if req.query_string().contains("type=spymaster") {
+        ClientType::Spymaster
+    } else {
+        ClientType::Public
+    };
     let id = ws_state.get_next_id();
-    let ws_conn = WebsocketConnection {
+    let ws_conn = WsConnection {
         id,
+        client_type,
         tx: ws_state.broadcast_tx.clone(),
     };
     ws::start(ws_conn, &req, stream)
