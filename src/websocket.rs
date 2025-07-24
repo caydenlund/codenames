@@ -1,23 +1,20 @@
-use actix::{Actor, ActorContext, AsyncContext, Handler, Message, StreamHandler};
+use actix::prelude::*;
 use actix_web::{HttpRequest, HttpResponse, Result, web};
 use actix_web_actors::ws;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ClientType {
-    Public,
-    Spymaster,
-}
+const HEARTBEAT: Duration = Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_secs(20);
 
+// WebSocket message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsMessage {
-    #[serde(rename = "card_revealed")]
     CardRevealed { data: CardRevealData },
-
-    #[serde(rename = "new_game")]
     NewGame { data: serde_json::Value },
 }
 
@@ -28,141 +25,266 @@ pub struct CardRevealData {
     pub new_card_state: serde_json::Value,
 }
 
-#[derive(Message, Clone)]
-#[rtype(result = "()")]
-pub struct BroadcastMessage(pub WsMessage);
-
-pub struct WsConnection {
-    pub id: usize,
-    pub client_type: ClientType,
-    pub tx: broadcast::Sender<(WsMessage, Option<ClientType>)>,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClientType {
+    Public,
+    Spymaster,
 }
 
-impl Actor for WsConnection {
-    type Context = ws::WebsocketContext<Self>;
-
-    fn started(&mut self, ctx: &mut Self::Context) {
-        let mut rx = self.tx.subscribe();
-        let addr = ctx.address();
-        let client_type = self.client_type;
-        let id = self.id;
-
-        println!("Websocket connection {client_type:?} {id} started",);
-
-        actix::spawn(async move {
-            while let Ok((msg, tgt)) = rx.recv().await {
-                match tgt {
-                    Some(typ) => {
-                        if typ == client_type {
-                            println!("Sending to {client_type:?} {id}:\n{msg:?}");
-                            addr.do_send(BroadcastMessage(msg))
-                        } else {
-                            println!("Ignoring {client_type:?} {id}:\n{msg:?}");
-                        }
-                    }
-                    None => {
-                        println!("Sending to {client_type:?} {id}:\n{msg:?}");
-                        addr.do_send(BroadcastMessage(msg))
-                    }
-                }
-            }
-        });
-    }
-
-    fn stopped(&mut self, _ctx: &mut Self::Context) {
-        println!(
-            "Websocket connection {:?} {} stopped",
-            self.client_type, self.id
-        );
-    }
+// Connection info stored in WsState
+#[derive(Debug, Clone)]
+struct ConnectionInfo {
+    client_type: ClientType,
+    last_pong: Instant,
+    addr: actix::Addr<WebSocketSession>,
 }
 
-impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
-    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
-        match msg {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            // Ok(ws::Message::Pong(_)) => {}
-            Ok(ws::Message::Text(text)) => {
-                println!("Received text: `{text}`");
-            }
-            // Ok(ws::Message::Binary(_)) => {}
-            Ok(ws::Message::Close(reason)) => {
-                println!("Closing for reason: `{reason:?}`");
-                ctx.close(reason);
-                ctx.stop();
-            }
-            Err(e) => {
-                println!("Websocket error: `{e}`");
-                ctx.stop();
-            }
-            _ => {
-                println!("Unhandled message type: `{msg:?}`");
-            }
-        }
-    }
-}
-
-impl Handler<BroadcastMessage> for WsConnection {
-    type Result = ();
-
-    fn handle(&mut self, msg: BroadcastMessage, ctx: &mut Self::Context) {
-        // Serialize and send the message to the client
-        match serde_json::to_string(&msg.0) {
-            Ok(json) => ctx.text(json),
-            Err(e) => println!("Failed to serialize Websocket message: `{e}`"),
-        }
-    }
-}
-
-#[derive(Clone)]
+// Shared state for managing connections
+#[derive(Debug, Clone)]
 pub struct WsState {
-    pub next_conn_id: Arc<Mutex<usize>>,
-    pub broadcast_tx: broadcast::Sender<(WsMessage, Option<ClientType>)>,
+    connections: Arc<Mutex<HashMap<u64, ConnectionInfo>>>,
+    next_id: Arc<AtomicU64>,
 }
 
 impl WsState {
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(1000);
         Self {
-            next_conn_id: Arc::new(Mutex::new(0)),
-            broadcast_tx: tx,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
-    pub fn get_next_id(&self) -> usize {
-        let mut id = self.next_conn_id.lock().unwrap();
-        *id += 1;
-        *id
+    pub fn add_connection(
+        &self,
+        id: u64,
+        client_type: ClientType,
+        addr: actix::Addr<WebSocketSession>,
+    ) {
+        let mut connections = self.connections.lock().unwrap();
+        connections.insert(
+            id,
+            ConnectionInfo {
+                client_type,
+                last_pong: Instant::now(),
+                addr,
+            },
+        );
+    }
+
+    pub fn remove_connection(&self, id: &u64) {
+        let mut connections = self.connections.lock().unwrap();
+        connections.remove(id);
+    }
+
+    pub fn update_pong_time(&self, id: &u64) {
+        let mut connections = self.connections.lock().unwrap();
+        if let Some(info) = connections.get_mut(id) {
+            info.last_pong = Instant::now();
+        }
+    }
+
+    pub fn next_connection_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn broadcast(&self, message: (WsMessage, Option<ClientType>)) {
-        if let Err(e) = self.broadcast_tx.send(message) {
-            println!("Failed to broadcast message: `{e}`");
+        let (msg, target_type) = message;
+        let connections = self.connections.lock().unwrap();
+
+        for info in connections.values() {
+            if let Some(target) = target_type {
+                if info.client_type != target {
+                    continue;
+                }
+            }
+
+            if let Err(e) = info.addr.try_send(BroadcastMessage(msg.clone())) {
+                log::warn!("Failed to send message to client: {:?}", e);
+            }
+        }
+    }
+
+    // Cleanup stale connections and ping active ones
+    pub async fn cleanup_and_ping(&self) {
+        let mut to_remove = Vec::new();
+        let mut to_ping = Vec::new();
+
+        {
+            let mut connections = self.connections.lock().unwrap();
+            let now = Instant::now();
+
+            // Find connections to remove (no pong for 60 seconds) and ping active ones
+            for (id, info) in connections.iter() {
+                if now.duration_since(info.last_pong) > Duration::from_secs(60) {
+                    to_remove.push(*id);
+                } else {
+                    to_ping.push(info.addr.clone());
+                }
+            }
+
+            // Remove stale connections
+            for id in &to_remove {
+                connections.remove(id);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            log::info!("Cleaned up {} stale WebSocket connections", to_remove.len());
+        }
+
+        // Send ping to active connections
+        for addr in to_ping {
+            if let Err(e) = addr.try_send(SendPing) {
+                log::warn!("Failed to ping client: {:?}", e);
+            }
+        }
+    }
+
+    pub fn connection_count(&self) -> usize {
+        self.connections.lock().unwrap().len()
+    }
+}
+
+// Actor messages
+#[derive(Message)]
+#[rtype(result = "()")]
+struct BroadcastMessage(WsMessage);
+
+#[derive(Message)]
+#[rtype(result = "()")]
+struct SendPing;
+
+// WebSocket session actor
+pub struct WebSocketSession {
+    id: u64,
+    client_type: ClientType,
+    ws_state: web::Data<WsState>,
+    heartbeat: Instant,
+}
+
+impl WebSocketSession {
+    fn new(client_type: ClientType, ws_state: web::Data<WsState>) -> Self {
+        let id = ws_state.next_connection_id();
+        Self {
+            id,
+            client_type,
+            ws_state,
+            heartbeat: Instant::now(),
+        }
+    }
+
+    fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
+        ctx.run_interval(HEARTBEAT, |act, ctx| {
+            if Instant::now().duration_since(act.heartbeat) > TIMEOUT {
+                log::info!(
+                    "WebSocket client {} heartbeat failed, disconnecting",
+                    act.id
+                );
+                ctx.stop();
+            }
+        });
+    }
+}
+
+impl Actor for WebSocketSession {
+    type Context = ws::WebsocketContext<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        self.heartbeat(ctx);
+        self.ws_state
+            .add_connection(self.id, self.client_type, ctx.address());
+        log::info!(
+            "WebSocket client {} connected ({:?})",
+            self.id,
+            self.client_type
+        );
+    }
+
+    fn stopped(&mut self, _ctx: &mut Self::Context) {
+        self.ws_state.remove_connection(&self.id);
+        log::info!("WebSocket client {} disconnected", self.id);
+    }
+}
+
+impl Handler<BroadcastMessage> for WebSocketSession {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastMessage, ctx: &mut Self::Context) {
+        if let Ok(json) = serde_json::to_string(&msg.0) {
+            ctx.text(json);
         }
     }
 }
 
-impl Default for WsState {
-    fn default() -> Self {
-        Self::new()
+impl Handler<SendPing> for WebSocketSession {
+    type Result = ();
+
+    fn handle(&mut self, _msg: SendPing, ctx: &mut Self::Context) -> Self::Result {
+        ctx.ping(b"")
     }
 }
 
-pub async fn get_ws(
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WebSocketSession {
+    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+        match msg {
+            Ok(ws::Message::Ping(msg)) => {
+                self.heartbeat = Instant::now();
+                ctx.pong(&msg);
+            }
+            Ok(ws::Message::Pong(_)) => {
+                self.heartbeat = Instant::now();
+                self.ws_state.update_pong_time(&self.id);
+            }
+            Ok(ws::Message::Text(text)) => {
+                self.heartbeat = Instant::now();
+                log::info!("WebSocket client {} sent text: {:?}", self.id, text);
+            }
+            Ok(ws::Message::Binary(_)) => {
+                log::warn!("Binary messages not supported");
+            }
+            Ok(ws::Message::Close(reason)) => {
+                log::info!("WebSocket client {} closing: {:?}", self.id, reason);
+                ctx.stop();
+            }
+            Err(e) => {
+                log::error!("WebSocket error for client {}: {:?}", self.id, e);
+                ctx.stop();
+            }
+            _ => {}
+        }
+    }
+}
+
+// HTTP endpoints to upgrade to WebSocket
+pub async fn get_public(
     req: HttpRequest,
     stream: web::Payload,
     ws_state: web::Data<WsState>,
 ) -> Result<HttpResponse> {
-    let client_type = if req.query_string().contains("type=spymaster") {
-        ClientType::Spymaster
-    } else {
-        ClientType::Public
-    };
-    let id = ws_state.get_next_id();
-    let ws_conn = WsConnection {
-        id,
-        client_type,
-        tx: ws_state.broadcast_tx.clone(),
-    };
-    ws::start(ws_conn, &req, stream)
+    let session = WebSocketSession::new(ClientType::Public, ws_state);
+    ws::start(session, &req, stream)
+}
+
+pub async fn get_spymaster(
+    req: HttpRequest,
+    stream: web::Payload,
+    ws_state: web::Data<WsState>,
+) -> Result<HttpResponse> {
+    let session = WebSocketSession::new(ClientType::Spymaster, ws_state);
+    ws::start(session, &req, stream)
+}
+
+// Background task function
+pub async fn websocket_cleanup_task(ws_state: web::Data<WsState>) {
+    let mut interval = tokio::time::interval(HEARTBEAT);
+
+    loop {
+        interval.tick().await;
+        ws_state.cleanup_and_ping().await;
+
+        let count = ws_state.connection_count();
+        if count > 0 {
+            log::debug!("Active WebSocket connections: {}", count);
+        }
+    }
 }

@@ -553,6 +553,7 @@ dependencies = [
  "actix-web-actors",
  "clap",
  "env_logger",
+ "log",
  "mime_guess",
  "rand",
  "rust-embed",

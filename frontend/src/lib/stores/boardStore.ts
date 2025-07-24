@@ -170,7 +170,7 @@ class BoardStore {
         }
 
         try {
-            const wsUrl = `/ws?type=${this._mode}`;
+            const wsUrl = `/ws/${this._mode}`;
 
             this._ws = new WebSocket(wsUrl);
 
@@ -189,7 +189,6 @@ class BoardStore {
             };
 
             this._ws.onmessage = (event) => {
-                console.log("WebSocket message: ", event.data);
                 try {
                     const message: WsMessage = JSON.parse(event.data);
                     this._handleWebSocketMessage(message);
